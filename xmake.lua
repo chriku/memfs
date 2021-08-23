@@ -1,0 +1,11 @@
+target("memfs")
+  set_kind("binary")
+  add_files("main.cpp")
+  add_rules("mode.debug", "mode.release")
+  add_defines("_FILE_OFFSET_BITS=64")
+  set_warnings("all")
+  set_languages("c++20")
+  set_optimize("fastest")
+  add_links("fuse3")
+
+  add_includedirs("json/single_include")
