@@ -5,7 +5,7 @@ Accepts two parameters:
 ```JSON
 {
   "/data/meshes/architecture/riften/docks/rtdockpier02.nif": "/mnt/hdd/christian/skyrim_se/smim_lc/data/meshes/architecture/riften/docks/rtdockpier02.nif",
-  "/data/textures/landscape/trees/vurt_barkpine1_n.dds": "/mnt/hdd/christian/skyrim_se/flora_lc/data/textures/landscape/trees/vurt_barkpine1_n.dds",
+  "/data/textures/landscape/trees/vurt_barkpine1_n.dds": "/mnt/hdd/christian/skyrim_se/flora_lc/data/textures/landscape/trees/vurt_barkpine1_n.dds"
 }
 ```
 * mount point
