@@ -1,4 +1,4 @@
-# Pure in memory caching filesystem with integrated file mapping
+# fuse in-memory, readonly filesystem with file mapping
 
 Accepts two parameters:
 * Layout as filename to json, key being the relative path inside the mount (with prefixed `/`), value is the file to load from:
