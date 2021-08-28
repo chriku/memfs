@@ -1,6 +1,7 @@
 #define FUSE_USE_VERSION 31
 
 #include <assert.h>
+#include <chrono>
 #include <errno.h>
 #include <fcntl.h>
 #include <filesystem>
@@ -12,60 +13,95 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
-struct options {
-  char* myfn;
-};
-
-#define OPTION(t, p)                                                                                                   \
-  { t, offsetof(struct options, p), 1 }
-static const struct fuse_opt option_spec[] = {OPTION("", myfn), FUSE_OPT_END};
+static const struct fuse_opt option_spec[] = {FUSE_OPT_END};
+using namespace std::literals;
 
 std::filesystem::path root;
 struct memfs;
-memfs* glbmemfs;
+memfs* cache_instance;
 struct memfs {
   std::unordered_map<std::string, std::string> files;
-  memfs() {
+  std::unordered_map<std::string, std::unordered_set<std::string>> dirs;
+  std::ofstream errlog;
+  memfs() : errlog("/tmp/missing.txt") {
     std::cout << "READING" << std::endl;
     std::ifstream jfile(root);
     auto info = nlohmann::json::parse(jfile).get<std::unordered_map<std::string, std::string>>();
     std::vector<char> buf(1024 * 1024 * 16);
-    for (auto& [destination, source] : info) {
+    std::cout << std::endl;
+    size_t cnt = 0;
+    std::vector<std::string> list;
+    for (const auto& [destination, source] : info)
+      list.push_back(destination);
+    auto last = std::chrono::steady_clock::now();
+    std::sort(list.begin(), list.end(), [&info](std::string a, std::string b) { return info.at(a) < info.at(b); });
+    for (const auto& destination : list) {
+      auto source = info.at(destination);
       if (!destination.starts_with("/")) {
         throw std::runtime_error("Invalid destination: " + destination);
       }
-      {
+      std::string pre = "/";
+      for (size_t i = 0; i < destination.size(); i = destination.find("/", i + 1)) {
+        std::string fnp = destination.substr(i + 1);
+        if (fnp.find("/") != std::string::npos)
+          fnp = fnp.substr(0, fnp.find("/"));
+        dirs[pre].insert(fnp);
+        pre += fnp + "/";
+      }
+      try {
         std::string data;
-        std::ifstream is(source, std::ios_base::binary);
+        std::ifstream is;
+        is.exceptions(std::ifstream::failbit | std::ifstream::badbit);
+        is.open(source, std::ios_base::binary);
+        if (!(is.good() && is.is_open()))
+          throw std::runtime_error("Open Error");
+        is.exceptions(std::ifstream::badbit);
         do {
           is.read(buf.data(), buf.size());
           data.append(std::string_view(buf.data(), is.gcount()));
         } while (is);
         files.emplace(destination, std::move(data));
+        const auto& d = files.at(destination);
+        mlock(d.data(), d.size());
+      } catch (...) {
+        std::cout << source << std::endl;
+        throw;
+      }
+      cnt++;
+      if ((std::chrono::steady_clock::now() - last) > 200ms) {
+        last = std::chrono::steady_clock::now();
+        std::string fn = destination;
+        while (fn.size() < 1000)
+          fn.append(" ");
+        fn = fn.substr(0, 120);
+        std::cout << cnt << "/" << info.size() << " " << fn << "\r" << std::flush;
       }
     }
+    dirs["//"] = dirs["/"];
     std::cout << "READY " << std::endl;
   }
   int getattr(std::string path, struct stat& stbuf) {
-    if (is_dir(path)) {
+    if (dirs.contains(path + "/")) {
       stbuf.st_mode = S_IFDIR | 0755;
       stbuf.st_nlink = 2;
       stbuf.st_uid = geteuid();
       stbuf.st_gid = getegid();
       return 0;
     } else if (files.contains(path)) {
-      stbuf.st_mode = S_IFREG | 0444;
+      stbuf.st_mode = S_IFREG | 0666;
       stbuf.st_nlink = 1;
       stbuf.st_size = files.at(path).size();
       stbuf.st_uid = geteuid();
       stbuf.st_gid = getegid();
       return 0;
     }
+    errlog << path << std::endl << std::flush;
     return -ENOENT;
   }
   int open(std::string path, struct fuse_file_info* fi) {
@@ -75,6 +111,7 @@ struct memfs {
       }
       return 0;
     }
+    errlog << path << std::endl << std::flush;
     return -ENOENT;
   }
   int read(std::string path, std::span<char> target, off_t offset) {
@@ -85,38 +122,22 @@ struct memfs {
       std::copy(ctx.begin(), ctx.end(), target.begin());
       return ctx.size();
     }
+    errlog << path << std::endl << std::flush;
     return -ENOENT;
-  }
-  bool is_dir(std::string path) const {
-    if (!path.ends_with("/"))
-      path += "/";
-    for (const auto& [filename, data] : files) {
-      if (filename.starts_with(path))
-        return true;
-    }
-    return false;
   }
   template <typename add_file_t> int readdir(std::string path, add_file_t add_file) {
     if (!path.ends_with("/"))
-      path += "/";
-    if (is_dir(path)) {
+      path.append("/");
+    if (dirs.contains(path)) {
       add_file(".");
       add_file("..");
-      std::unordered_set<std::string> items;
-      for (const auto& [filename, data] : files) {
-        if (filename.substr(0, path.size()) == path) {
-          std::string fnp = filename.substr(path.size());
-          if (fnp.find("/") != std::string::npos)
-            fnp = fnp.substr(0, fnp.find("/"));
-          items.insert(fnp);
-        }
-      }
-      for (const auto& item : items) {
+      for (const auto& item : dirs.at(path)) {
         if (item.size())
           add_file(item);
       }
       return 0;
     }
+    errlog << path << std::endl << std::flush;
     return -ENOENT;
   }
 };
@@ -171,10 +192,12 @@ static const struct fuse_operations hello_oper = {
     .init = [](struct fuse_conn_info* conn, fuse_config* cfg) -> void* {
       (void)conn;
       cfg->kernel_cache = 1;
-      return glbmemfs;
+      return cache_instance;
     },
-    //.destroy = [](void* private_data) { delete reinterpret_cast<memfs*>(private_data); }
-};
+    .destroy =
+        [](void* private_data) {
+          // delete reinterpret_cast<memfs*>(private_data); // Moved to global
+        }};
 
 int main(int argc, char* argv[]) {
   if ((argc < 3) || (argv[argc - 2][0] == '-') || (argv[argc - 1][0] == '-')) {
@@ -185,15 +208,11 @@ int main(int argc, char* argv[]) {
   argv[argc - 2] = argv[argc - 1];
   argv[argc - 1] = NULL;
   argc--;
-  glbmemfs = new memfs();
-
+  cache_instance = new memfs();
   int ret;
   struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
-
-  /* Parse options */
   if (fuse_opt_parse(&args, nullptr, option_spec, NULL) == -1)
     return 1;
-
   ret = fuse_main(args.argc, args.argv, &hello_oper, NULL);
   fuse_opt_free_args(&args);
   return ret;
